@@ -1,6 +1,6 @@
 # ai_quota
 
-A simple macOS menu bar app that shows your **Claude Code** and **Codex CLI** quota at a glance — session and weekly, with reset times.
+A simple macOS menu bar app that shows your **Claude Code** and **Codex CLI** quota at a glance : session and weekly, with reset times.
 
 ![preview](preview.jpg)
 
