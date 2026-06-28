@@ -18,7 +18,7 @@ macOS menu bar app that shows your **Claude Code** and **Codex CLI** quota at a 
 ## Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai_quota.git
+git clone git@github.com:htlcode/ai_quota.git
 cd ai_quota
 go build -o ai_quota .
 ```
@@ -43,20 +43,8 @@ The app appears in your menu bar as **AI** with a 🟢 or 🔴 status dot.
 
 Click the menu bar icon to see:
 
-```
-CLAUDE
-   Session   ▰▰▰▰▰▰▱▱▱▱   62%  ·  resets 18:45
-   Weekly    ▰▰▰▰▱▱▱▱▱▱   40%  ·  resets 2026/07/01 at 00:00
-
-CODEX
-   Session   ▰▰▰▰▰▰▰▰▱▱   80%  ·  resets 14:30
-   Weekly    ▰▰▰▰▰▰▱▱▱▱   60%  ·  resets 2026/07/01 at 00:00
-
-↻  Refresh
-✕  Quit
-```
-
-Percentages show **remaining** quota. Click **↻ Refresh** to fetch latest values.
+Percentages show **remaining** quota. 
+Click **↻ Refresh** to fetch latest values.
 
 ---
 
