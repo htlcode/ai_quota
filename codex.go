@@ -11,11 +11,12 @@ import (
 )
 
 type CodexStats struct {
-	Available bool
-	Session   QuotaInfo
-	Weekly    QuotaInfo
-	PlanType  string
-	Error     string
+	Available    bool
+	Session      QuotaInfo
+	Weekly       QuotaInfo
+	PlanType     string
+	ResetCredits int // -1 = unknown
+	Error        string
 }
 
 type rpcMsg struct {
@@ -38,6 +39,24 @@ type rateLimitsResult struct {
 		} `json:"secondary"`
 		PlanType string `json:"planType"`
 	} `json:"rateLimits"`
+	RateLimitsSnake struct {
+		Primary *struct {
+			UsedPercent float64 `json:"used_percent"`
+			ResetsAt    int64   `json:"resets_at"`
+		} `json:"primary"`
+		Secondary *struct {
+			UsedPercent float64 `json:"used_percent"`
+			ResetsAt    int64   `json:"resets_at"`
+		} `json:"secondary"`
+		PlanType string `json:"plan_type"`
+	} `json:"rate_limits"`
+	ResetCredits      *resetCreditsSummary `json:"rateLimitResetCredits"`
+	ResetCreditsSnake *resetCreditsSummary `json:"rate_limit_reset_credits"`
+}
+
+type resetCreditsSummary struct {
+	AvailableCount      int `json:"availableCount"`
+	AvailableCountSnake int `json:"available_count"`
 }
 
 func fetchCodex() CodexStats {
@@ -137,24 +156,60 @@ func fetchCodex() CodexStats {
 func buildCodexStats(r rateLimitsResult) CodexStats {
 	rl := r.RateLimits
 	stats := CodexStats{
-		Available: true,
-		PlanType:  rl.PlanType,
-		Session:   QuotaInfo{Label: "Session", Percent: -1},
-		Weekly:    QuotaInfo{Label: "Weekly", Percent: -1},
+		Available:    true,
+		PlanType:     rl.PlanType,
+		ResetCredits: -1,
+		Session:      QuotaInfo{Label: "Session", Percent: -1},
+		Weekly:       QuotaInfo{Label: "Weekly", Percent: -1},
+	}
+
+	if stats.PlanType == "" {
+		stats.PlanType = r.RateLimitsSnake.PlanType
 	}
 
 	if rl.Primary != nil {
-		stats.Session.Percent = int(100 - rl.Primary.UsedPercent)
-		if rl.Primary.ResetsAt > 0 {
-			stats.Session.ResetsAt = time.Unix(rl.Primary.ResetsAt, 0)
-		}
+		stats.Session = codexQuota("Session", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+	} else if r.RateLimitsSnake.Primary != nil {
+		stats.Session = codexQuota("Session", r.RateLimitsSnake.Primary.UsedPercent, r.RateLimitsSnake.Primary.ResetsAt)
 	}
 	if rl.Secondary != nil {
-		stats.Weekly.Percent = int(100 - rl.Secondary.UsedPercent)
-		if rl.Secondary.ResetsAt > 0 {
-			stats.Weekly.ResetsAt = time.Unix(rl.Secondary.ResetsAt, 0)
-		}
+		stats.Weekly = codexQuota("Weekly", rl.Secondary.UsedPercent, rl.Secondary.ResetsAt)
+	} else if r.RateLimitsSnake.Secondary != nil {
+		stats.Weekly = codexQuota("Weekly", r.RateLimitsSnake.Secondary.UsedPercent, r.RateLimitsSnake.Secondary.ResetsAt)
 	}
 
+	stats.ResetCredits = codexResetCredits(r)
+
 	return stats
+}
+
+func codexQuota(label string, usedPercent float64, resetsAt int64) QuotaInfo {
+	q := QuotaInfo{Label: label, Percent: int(100 - usedPercent)}
+	if q.Percent < 0 {
+		q.Percent = 0
+	}
+	if q.Percent > 100 {
+		q.Percent = 100
+	}
+	if resetsAt > 0 {
+		q.ResetsAt = time.Unix(resetsAt, 0)
+	}
+	return q
+}
+
+func codexResetCredits(r rateLimitsResult) int {
+	if r.ResetCredits != nil {
+		return r.ResetCredits.availableCount()
+	}
+	if r.ResetCreditsSnake != nil {
+		return r.ResetCreditsSnake.availableCount()
+	}
+	return -1
+}
+
+func (r resetCreditsSummary) availableCount() int {
+	if r.AvailableCountSnake > 0 {
+		return r.AvailableCountSnake
+	}
+	return r.AvailableCount
 }

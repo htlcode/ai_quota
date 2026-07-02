@@ -25,6 +25,8 @@ func onReady() {
 	systray.AddMenuItem("CODEX", "")
 	mCodexSession := systray.AddMenuItem("   Session  loading...", "")
 	mCodexWeekly := systray.AddMenuItem("   Weekly   loading...", "")
+	mCodexResets := systray.AddMenuItem("", "")
+	mCodexResets.Hide()
 
 	systray.AddSeparator()
 
@@ -64,9 +66,11 @@ func onReady() {
 		if !codex.Available {
 			mCodexSession.SetTitle("   ⚠ " + codex.Error)
 			mCodexWeekly.SetTitle("")
+			mCodexResets.Hide()
 		} else {
 			mCodexSession.SetTitle(formatQuota("Session", codex.Session))
 			mCodexWeekly.SetTitle(formatQuota("Weekly ", codex.Weekly))
+			updateCodexResetCredits(mCodexResets, codex.ResetCredits)
 		}
 
 		systray.SetTitle(menuBarTitle(claude, codex))
@@ -84,6 +88,15 @@ func onReady() {
 			return
 		}
 	}
+}
+
+func updateCodexResetCredits(item *systray.MenuItem, count int) {
+	if count < 0 {
+		item.Hide()
+		return
+	}
+	item.SetTitle(fmt.Sprintf("   Usage resets available : %d", count))
+	item.Show()
 }
 
 func formatQuota(label string, q QuotaInfo) string {

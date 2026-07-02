@@ -30,6 +30,7 @@ type ClaudeStats struct {
 }
 
 var rePct = regexp.MustCompile(`(?i)(\d{1,3})\s*%\s*(used|left)`)
+var reClaudeSection = regexp.MustCompile(`(?i)^\s*Current\s+(session|week)(?:\s*\(([^)]+)\))?`)
 
 func fetchClaude() ClaudeStats {
 	raw, err := runClaudeUsageInPTY(20 * time.Second)
@@ -148,22 +149,36 @@ func parseClaudeUsage(text string) ClaudeStats {
 	found := false
 
 	for i, line := range lines {
-		lower := strings.ToLower(line)
-
-		if strings.Contains(lower, "current session") {
-			if pct := findPctWindow(lines, i, 12); pct >= 0 {
-				stats.Session.Percent = pct
-				stats.Session.ResetsAt = parseClaudeReset(findResetWindow(lines, i, 14))
-				found = true
-			}
+		m := reClaudeSection.FindStringSubmatch(line)
+		if m == nil {
+			continue
 		}
 
-		if strings.Contains(lower, "current week") {
-			if pct := findPctWindow(lines, i, 12); pct >= 0 {
-				stats.Weekly.Percent = pct
-				stats.Weekly.ResetsAt = parseClaudeReset(findResetWindow(lines, i, 14))
-				found = true
+		section := claudeSectionLines(lines, i)
+		if pct := findPct(section); pct >= 0 {
+			q := QuotaInfo{
+				Label:    claudeQuotaLabel(m[1], m[2]),
+				Percent:  pct,
+				ResetsAt: parseClaudeReset(findReset(section)),
 			}
+
+			kind := strings.ToLower(m[1])
+			model := strings.ToLower(strings.TrimSpace(m[2]))
+			if kind == "session" {
+				stats.Session = q
+				found = true
+				continue
+			}
+
+			if model == "" || model == "all models" {
+				q.Label = "Weekly"
+				stats.Weekly = q
+				found = true
+				continue
+			}
+
+			// Ignore per-model weekly sections such as "Current week (Fable)".
+			// The menu only displays Claude's aggregate "all models" quota.
 		}
 	}
 
@@ -175,14 +190,31 @@ func parseClaudeUsage(text string) ClaudeStats {
 	return stats
 }
 
-// findPctWindow finds first "X% used" or "X% left" within window lines after idx.
-// "used" → remaining = 100-X; "left" → remaining = X.
-func findPctWindow(lines []string, idx, window int) int {
-	end := idx + window
-	if end > len(lines) {
-		end = len(lines)
+func claudeSectionLines(lines []string, idx int) []string {
+	end := len(lines)
+	for i := idx + 1; i < len(lines); i++ {
+		if reClaudeSection.MatchString(lines[i]) {
+			end = i
+			break
+		}
 	}
-	for _, l := range lines[idx:end] {
+	return lines[idx:end]
+}
+
+func claudeQuotaLabel(kind, model string) string {
+	model = strings.TrimSpace(model)
+	if strings.EqualFold(kind, "session") {
+		return "Session"
+	}
+	if model == "" || strings.EqualFold(model, "all models") {
+		return "Weekly"
+	}
+	return model
+}
+
+// "used" → remaining = 100-X; "left" → remaining = X.
+func findPct(lines []string) int {
+	for _, l := range lines {
 		m := rePct.FindStringSubmatch(l)
 		if m == nil {
 			continue
@@ -203,12 +235,8 @@ func findPctWindow(lines []string, idx, window int) int {
 	return -1
 }
 
-func findResetWindow(lines []string, idx, window int) string {
-	end := idx + window
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for _, l := range lines[idx:end] {
+func findReset(lines []string) string {
+	for _, l := range lines {
 		lower := strings.ToLower(l)
 		if strings.Contains(lower, "reset") {
 			return strings.TrimSpace(l)
