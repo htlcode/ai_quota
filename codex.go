@@ -28,30 +28,36 @@ type rpcMsg struct {
 }
 
 type rateLimitsResult struct {
-	RateLimits struct {
-		Primary *struct {
-			UsedPercent float64 `json:"usedPercent"`
-			ResetsAt    int64   `json:"resetsAt"`
-		} `json:"primary"`
-		Secondary *struct {
-			UsedPercent float64 `json:"usedPercent"`
-			ResetsAt    int64   `json:"resetsAt"`
-		} `json:"secondary"`
-		PlanType string `json:"planType"`
-	} `json:"rateLimits"`
-	RateLimitsSnake struct {
-		Primary *struct {
-			UsedPercent float64 `json:"used_percent"`
-			ResetsAt    int64   `json:"resets_at"`
-		} `json:"primary"`
-		Secondary *struct {
-			UsedPercent float64 `json:"used_percent"`
-			ResetsAt    int64   `json:"resets_at"`
-		} `json:"secondary"`
-		PlanType string `json:"plan_type"`
-	} `json:"rate_limits"`
-	ResetCredits      *resetCreditsSummary `json:"rateLimitResetCredits"`
-	ResetCreditsSnake *resetCreditsSummary `json:"rate_limit_reset_credits"`
+	RateLimits               codexRateLimits                 `json:"rateLimits"`
+	RateLimitsByLimitID      map[string]codexRateLimits      `json:"rateLimitsByLimitId"`
+	RateLimitsSnake          codexRateLimitsSnake            `json:"rate_limits"`
+	RateLimitsByLimitIDSnake map[string]codexRateLimitsSnake `json:"rate_limits_by_limit_id"`
+	ResetCredits             *resetCreditsSummary            `json:"rateLimitResetCredits"`
+	ResetCreditsSnake        *resetCreditsSummary            `json:"rate_limit_reset_credits"`
+}
+
+type codexRateLimits struct {
+	Primary   *codexRateLimitWindow `json:"primary"`
+	Secondary *codexRateLimitWindow `json:"secondary"`
+	PlanType  string                `json:"planType"`
+}
+
+type codexRateLimitWindow struct {
+	UsedPercent        float64 `json:"usedPercent"`
+	ResetsAt           int64   `json:"resetsAt"`
+	WindowDurationMins int64   `json:"windowDurationMins"`
+}
+
+type codexRateLimitsSnake struct {
+	Primary   *codexRateLimitWindowSnake `json:"primary"`
+	Secondary *codexRateLimitWindowSnake `json:"secondary"`
+	PlanType  string                     `json:"plan_type"`
+}
+
+type codexRateLimitWindowSnake struct {
+	UsedPercent        float64 `json:"used_percent"`
+	ResetsAt           int64   `json:"resets_at"`
+	WindowDurationMins int64   `json:"window_duration_mins"`
 }
 
 type resetCreditsSummary struct {
@@ -155,6 +161,9 @@ func fetchCodex() CodexStats {
 
 func buildCodexStats(r rateLimitsResult) CodexStats {
 	rl := r.RateLimits
+	if codexLimits, ok := r.RateLimitsByLimitID["codex"]; ok {
+		rl = codexLimits
+	}
 	stats := CodexStats{
 		Available:    true,
 		PlanType:     rl.PlanType,
@@ -164,23 +173,48 @@ func buildCodexStats(r rateLimitsResult) CodexStats {
 	}
 
 	if stats.PlanType == "" {
-		stats.PlanType = r.RateLimitsSnake.PlanType
+		snakeLimits := r.RateLimitsSnake
+		if codexLimits, ok := r.RateLimitsByLimitIDSnake["codex"]; ok {
+			snakeLimits = codexLimits
+		}
+		stats.PlanType = snakeLimits.PlanType
 	}
 
-	if rl.Primary != nil {
-		stats.Session = codexQuota("Session", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
-	} else if r.RateLimitsSnake.Primary != nil {
-		stats.Session = codexQuota("Session", r.RateLimitsSnake.Primary.UsedPercent, r.RateLimitsSnake.Primary.ResetsAt)
-	}
-	if rl.Secondary != nil {
-		stats.Weekly = codexQuota("Weekly", rl.Secondary.UsedPercent, rl.Secondary.ResetsAt)
-	} else if r.RateLimitsSnake.Secondary != nil {
-		stats.Weekly = codexQuota("Weekly", r.RateLimitsSnake.Secondary.UsedPercent, r.RateLimitsSnake.Secondary.ResetsAt)
+	if rl.Primary != nil || rl.Secondary != nil {
+		if rl.Primary != nil {
+			if isCodexWeeklyWindow(rl.Primary.WindowDurationMins) {
+				stats.Weekly = codexQuota("Weekly", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+			} else {
+				stats.Session = codexQuota("Session", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+			}
+		}
+		if rl.Secondary != nil {
+			stats.Weekly = codexQuota("Weekly", rl.Secondary.UsedPercent, rl.Secondary.ResetsAt)
+		}
+	} else {
+		snakeLimits := r.RateLimitsSnake
+		if codexLimits, ok := r.RateLimitsByLimitIDSnake["codex"]; ok {
+			snakeLimits = codexLimits
+		}
+		if snakeLimits.Primary != nil {
+			if isCodexWeeklyWindow(snakeLimits.Primary.WindowDurationMins) {
+				stats.Weekly = codexQuota("Weekly", snakeLimits.Primary.UsedPercent, snakeLimits.Primary.ResetsAt)
+			} else {
+				stats.Session = codexQuota("Session", snakeLimits.Primary.UsedPercent, snakeLimits.Primary.ResetsAt)
+			}
+		}
+		if snakeLimits.Secondary != nil {
+			stats.Weekly = codexQuota("Weekly", snakeLimits.Secondary.UsedPercent, snakeLimits.Secondary.ResetsAt)
+		}
 	}
 
 	stats.ResetCredits = codexResetCredits(r)
 
 	return stats
+}
+
+func isCodexWeeklyWindow(windowDurationMins int64) bool {
+	return windowDurationMins == 7*24*60
 }
 
 func codexQuota(label string, usedPercent float64, resetsAt int64) QuotaInfo {
