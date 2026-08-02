@@ -1,19 +1,12 @@
 package main
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"net/http"
 	"os/exec"
-	"regexp"
-	"strconv"
-	"strings"
-	"syscall"
 	"time"
-
-	"github.com/creack/pty"
-	"github.com/hinshun/vt10x"
 )
 
 type QuotaInfo struct {
@@ -29,337 +22,120 @@ type ClaudeStats struct {
 	Error     string
 }
 
-var rePct = regexp.MustCompile(`(?i)(\d{1,3})\s*%\s*(used|left)`)
-var reClaudeSection = regexp.MustCompile(`(?i)^\s*Current\s+(session|week)(?:\s*\(([^)]+)\))?`)
+// Endpoint + headers mirror Claude Code's own fetchUtilization
+// (GET /api/oauth/usage with the keychain OAuth access token).
+const (
+	claudeUsageURL     = "https://api.anthropic.com/api/oauth/usage"
+	claudeOAuthBeta    = "oauth-2025-04-20"
+	claudeKeychainItem = "Claude Code-credentials"
+)
+
+type claudeUsageResponse struct {
+	FiveHour *claudeWindow `json:"five_hour"`
+	SevenDay *claudeWindow `json:"seven_day"`
+}
+
+type claudeWindow struct {
+	Utilization float64 `json:"utilization"`
+	ResetsAt    string  `json:"resets_at"`
+}
+
+type claudeCredentials struct {
+	ClaudeAiOauth struct {
+		AccessToken string `json:"accessToken"`
+		ExpiresAt   int64  `json:"expiresAt"` // ms epoch
+	} `json:"claudeAiOauth"`
+}
 
 func fetchClaude() ClaudeStats {
-	raw, err := runClaudeUsageInPTY(20 * time.Second)
+	token, err := claudeAccessToken()
 	if err != nil {
 		return ClaudeStats{Error: "claude: " + err.Error()}
 	}
 
-	rendered := renderVT100(raw, 160, 50)
-	return parseClaudeUsage(rendered)
-}
-
-func runClaudeUsageInPTY(timeout time.Duration) (string, error) {
-	path, err := exec.LookPath("claude")
+	body, err := claudeUsageRequest(token)
 	if err != nil {
-		return "", fmt.Errorf("claude CLI not found")
+		return ClaudeStats{Error: "claude: " + err.Error()}
 	}
 
-	cmd := exec.Command(path, "/usage", "--allowed-tools", "")
+	return parseClaudeUsage(body)
+}
 
-	// Strip CLAUDE_CODE_OAUTH_TOKEN (inference-only, blocks quota access)
-	env := []string{}
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") {
-			continue
-		}
-		env = append(env, e)
-	}
-	cmd.Env = append(env, "TERM=xterm-256color", "COLUMNS=160", "LINES=50")
-
-	// Setsid: new session/group leader. Works cleanly with PTY (Setpgid
-	// would conflict with PTY's controlling-terminal setup on macOS).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 50, Cols: 160})
+// claudeAccessToken reads the OAuth token Claude Code stores in the macOS keychain.
+func claudeAccessToken() (string, error) {
+	out, err := exec.Command("security", "find-generic-password", "-s", claudeKeychainItem, "-w").Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("no keychain credentials (run claude /login)")
 	}
-	defer ptmx.Close()
 
-	// Guarantee reap on every return path.
-	defer func() {
-		killProcessGroup(cmd)
-		_ = cmd.Wait()
-	}()
-
-	var buf bytes.Buffer
-	doneRead := make(chan struct{})
-	go func() {
-		io.Copy(&buf, ptmx)
-		close(doneRead)
-	}()
-
-	settle := time.After(8 * time.Second)
-	hardKill := time.After(timeout)
-
-	for {
-		select {
-		case <-settle:
-			ptmx.Write([]byte("\r"))
-			time.Sleep(300 * time.Millisecond)
-			ptmx.Write([]byte("\r"))
-			time.Sleep(500 * time.Millisecond)
-			ptmx.Write([]byte{0x03}) // Ctrl-C
-			killProcessGroup(cmd)
-			<-doneRead
-			return buf.String(), nil
-		case <-hardKill:
-			killProcessGroup(cmd)
-			return buf.String(), nil
-		case <-doneRead:
-			return buf.String(), nil
-		}
+	var creds claudeCredentials
+	if err := json.Unmarshal(out, &creds); err != nil {
+		return "", fmt.Errorf("unreadable keychain credentials")
 	}
+
+	oauth := creds.ClaudeAiOauth
+	if oauth.AccessToken == "" {
+		return "", fmt.Errorf("no OAuth token (run claude /login)")
+	}
+	if oauth.ExpiresAt > 0 && time.Now().After(time.UnixMilli(oauth.ExpiresAt)) {
+		return "", fmt.Errorf("OAuth token expired (start claude to refresh)")
+	}
+	return oauth.AccessToken, nil
 }
 
-// killProcessGroup signals the whole process group. Ignores ESRCH/EPERM
-// (process already gone) — only real surprises bubble up.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
+func claudeUsageRequest(token string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, claudeUsageURL, nil)
+	if err != nil {
+		return nil, err
 	}
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		return
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", claudeOAuthBeta)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
 	}
-	_ = cmd.Process.Kill()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("usage API returned %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
-// renderVT100 feeds raw terminal output into a vt100 emulator and dumps the final screen.
-func renderVT100(raw string, cols, rows int) string {
-	term := vt10x.New(vt10x.WithSize(cols, rows))
-	term.Write([]byte(raw))
-
-	var sb strings.Builder
-	for y := 0; y < rows; y++ {
-		for x := 0; x < cols; x++ {
-			ch := term.Cell(x, y).Char
-			if ch == 0 {
-				ch = ' '
-			}
-			sb.WriteRune(ch)
-		}
-		sb.WriteByte('\n')
+func parseClaudeUsage(body []byte) ClaudeStats {
+	var usage claudeUsageResponse
+	if err := json.Unmarshal(body, &usage); err != nil {
+		return ClaudeStats{Error: "claude: malformed usage response"}
 	}
-	return sb.String()
-}
 
-func parseClaudeUsage(text string) ClaudeStats {
-	stats := ClaudeStats{
+	return ClaudeStats{
 		Available: true,
-		Session:   QuotaInfo{Label: "Session", Percent: -1},
-		Weekly:    QuotaInfo{Label: "Weekly", Percent: -1},
+		Session:   claudeQuota("Session", usage.FiveHour),
+		Weekly:    claudeQuota("Weekly", usage.SevenDay),
 	}
-
-	lines := strings.Split(text, "\n")
-	found := false
-
-	for i, line := range lines {
-		m := reClaudeSection.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-
-		section := claudeSectionLines(lines, i)
-		if pct := findPct(section); pct >= 0 {
-			q := QuotaInfo{
-				Label:    claudeQuotaLabel(m[1], m[2]),
-				Percent:  pct,
-				ResetsAt: parseClaudeReset(findReset(section)),
-			}
-
-			kind := strings.ToLower(m[1])
-			model := strings.ToLower(strings.TrimSpace(m[2]))
-			if kind == "session" {
-				stats.Session = q
-				found = true
-				continue
-			}
-
-			if model == "" || model == "all models" {
-				q.Label = "Weekly"
-				stats.Weekly = q
-				found = true
-				continue
-			}
-
-			// Ignore per-model weekly sections such as "Current week (Fable)".
-			// The menu only displays Claude's aggregate "all models" quota.
-		}
-	}
-
-	if !found {
-		stats.Available = false
-		stats.Error = "could not parse /usage output"
-	}
-
-	return stats
 }
 
-func claudeSectionLines(lines []string, idx int) []string {
-	end := len(lines)
-	for i := idx + 1; i < len(lines); i++ {
-		if reClaudeSection.MatchString(lines[i]) {
-			end = i
-			break
-		}
-	}
-	return lines[idx:end]
-}
-
-func claudeQuotaLabel(kind, model string) string {
-	model = strings.TrimSpace(model)
-	if strings.EqualFold(kind, "session") {
-		return "Session"
-	}
-	if model == "" || strings.EqualFold(model, "all models") {
-		return "Weekly"
-	}
-	return model
-}
-
-// "used" → remaining = 100-X; "left" → remaining = X.
-func findPct(lines []string) int {
-	for _, l := range lines {
-		m := rePct.FindStringSubmatch(l)
-		if m == nil {
-			continue
-		}
-		v, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
-		}
-		if strings.ToLower(m[2]) == "used" {
-			r := 100 - v
-			if r < 0 {
-				r = 0
-			}
-			return r
-		}
-		return v
-	}
-	return -1
-}
-
-func findReset(lines []string) string {
-	for _, l := range lines {
-		lower := strings.ToLower(l)
-		if strings.Contains(lower, "reset") {
-			return strings.TrimSpace(l)
-		}
-	}
-	return ""
-}
-
-var reTzParen = regexp.MustCompile(`\(([^)]+)\)`)
-
-// parseClaudeReset turns Claude reset text into a future time.Time (zero if unparseable).
-// Handles: "Resets in 2h 15m", "Resets 4:59pm (America/New_York)",
-// "Resets Jan 1, 2026", "Resets Dec 25 at 4:59am (TZ)".
-func parseClaudeReset(text string) time.Time {
-	if text == "" {
-		return time.Time{}
+// claudeQuota converts the API's utilization (percent used) into remaining percent.
+func claudeQuota(label string, w *claudeWindow) QuotaInfo {
+	if w == nil {
+		return QuotaInfo{Label: label, Percent: -1}
 	}
 
-	loc := time.Local
-	if m := reTzParen.FindStringSubmatch(text); m != nil {
-		if z, err := time.LoadLocation(strings.TrimSpace(m[1])); err == nil {
-			loc = z
-		}
+	remaining := 100 - int(w.Utilization)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > 100 {
+		remaining = 100
 	}
 
-	body := text
-	if idx := strings.LastIndex(strings.ToLower(body), "resets"); idx >= 0 {
-		body = body[idx+6:]
+	q := QuotaInfo{Label: label, Percent: remaining}
+	if t, err := time.Parse(time.RFC3339, w.ResetsAt); err == nil {
+		q.ResetsAt = t.Local()
 	}
-	body = reTzParen.ReplaceAllString(body, "")
-	body = strings.TrimSpace(body)
-	body = strings.ReplaceAll(body, " at ", ", ")
-	body = strings.TrimPrefix(strings.ToLower(body), "in ")
-
-	// Try relative duration first ("2h 15m", "2d 3h", "45m")
-	if d := parseRelDuration(body); d > 0 {
-		return time.Now().Add(d)
-	}
-
-	// Try absolute formats
-	formats := []string{
-		"Jan 2, 2006, 3:04pm",
-		"Jan 2, 2006, 3pm",
-		"Jan 2, 2006",
-		"Jan 2, 3:04pm",
-		"Jan 2, 3pm",
-		"3:04pm",
-		"3pm",
-		"Jan 2",
-	}
-	now := time.Now().In(loc)
-	for _, f := range formats {
-		t, err := time.ParseInLocation(f, body, loc)
-		if err != nil {
-			continue
-		}
-		return resolveFuture(t, f, now, loc)
-	}
-
-	return time.Time{}
-}
-
-func parseRelDuration(s string) time.Duration {
-	hasDigit := false
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			hasDigit = true
-			break
-		}
-	}
-	if !hasDigit {
-		return 0
-	}
-
-	var total time.Duration
-	matched := false
-
-	if m := regexp.MustCompile(`(\d+)\s*d`).FindStringSubmatch(s); m != nil {
-		v, _ := strconv.Atoi(m[1])
-		total += time.Duration(v) * 24 * time.Hour
-		matched = true
-	}
-	if m := regexp.MustCompile(`(\d+)\s*h`).FindStringSubmatch(s); m != nil {
-		v, _ := strconv.Atoi(m[1])
-		total += time.Duration(v) * time.Hour
-		matched = true
-	}
-	if m := regexp.MustCompile(`(\d+)\s*m(?:in)?\b`).FindStringSubmatch(s); m != nil {
-		v, _ := strconv.Atoi(m[1])
-		total += time.Duration(v) * time.Minute
-		matched = true
-	}
-
-	if !matched {
-		return 0
-	}
-	return total
-}
-
-func resolveFuture(t time.Time, format string, now time.Time, loc *time.Location) time.Time {
-	hasYear := strings.Contains(format, "2006")
-	hasMonth := strings.Contains(format, "Jan")
-	hasTime := strings.Contains(format, "3") || strings.Contains(format, "15")
-
-	if hasYear {
-		return t
-	}
-
-	if hasMonth {
-		candidate := time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
-		if candidate.After(now) {
-			return candidate
-		}
-		return time.Date(now.Year()+1, t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, loc)
-	}
-
-	if hasTime {
-		candidate := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, loc)
-		if candidate.After(now) {
-			return candidate
-		}
-		return candidate.Add(24 * time.Hour)
-	}
-
-	return t
+	return q
 }
