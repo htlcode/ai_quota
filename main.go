@@ -23,7 +23,6 @@ func onReady() {
 	systray.AddSeparator()
 
 	systray.AddMenuItem("CODEX", "")
-	mCodexSession := systray.AddMenuItem("   Session  loading...", "")
 	mCodexWeekly := systray.AddMenuItem("   Weekly   loading...", "")
 	mCodexResets := systray.AddMenuItem("", "")
 	mCodexResets.Hide()
@@ -64,11 +63,9 @@ func onReady() {
 
 		// Codex
 		if !codex.Available {
-			mCodexSession.SetTitle("   ⚠ " + codex.Error)
-			mCodexWeekly.SetTitle("")
+			mCodexWeekly.SetTitle("   ⚠ " + codex.Error)
 			mCodexResets.Hide()
 		} else {
-			mCodexSession.SetTitle(formatQuota("Session", codex.Session))
 			mCodexWeekly.SetTitle(formatQuota("Weekly ", codex.Weekly))
 			updateCodexResetCredits(mCodexResets, codex.ResetCredits)
 		}
@@ -147,7 +144,7 @@ func progressBar(pct, width int) string {
 // Never shows percentage.
 func menuBarTitle(c ClaudeStats, cx CodexStats) string {
 	claudeOK := c.Available && (c.Session.Percent >= 0 || c.Weekly.Percent >= 0)
-	codexOK := cx.Available && (cx.Session.Percent >= 0 || cx.Weekly.Percent >= 0)
+	codexOK := cx.Available && cx.Weekly.Percent >= 0
 
 	if claudeOK && codexOK {
 		return "🟢 AI"

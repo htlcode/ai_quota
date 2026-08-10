@@ -23,9 +23,6 @@ func TestBuildCodexStatsReadsResetCreditsCamelCase(t *testing.T) {
 	if stats.ResetCredits != 2 {
 		t.Fatalf("reset credits = %d, want 2", stats.ResetCredits)
 	}
-	if stats.Session.Percent != 75 {
-		t.Fatalf("session remaining = %d, want 75", stats.Session.Percent)
-	}
 	if stats.Weekly.Percent != 90 {
 		t.Fatalf("weekly remaining = %d, want 90", stats.Weekly.Percent)
 	}
@@ -48,9 +45,6 @@ func TestBuildCodexStatsReadsResetCreditsSnakeCase(t *testing.T) {
 	stats := buildCodexStats(result)
 	if stats.ResetCredits != 0 {
 		t.Fatalf("reset credits = %d, want 0", stats.ResetCredits)
-	}
-	if stats.Session.Percent != 75 {
-		t.Fatalf("session remaining = %d, want 75", stats.Session.Percent)
 	}
 	if stats.Weekly.Percent != 90 {
 		t.Fatalf("weekly remaining = %d, want 90", stats.Weekly.Percent)
@@ -80,9 +74,6 @@ func TestBuildCodexStatsReadsWeeklyFromCodexLimitBucket(t *testing.T) {
 	if stats.PlanType != "plus" {
 		t.Fatalf("plan type = %q, want plus", stats.PlanType)
 	}
-	if stats.Session.Percent != 75 {
-		t.Fatalf("session remaining = %d, want 75", stats.Session.Percent)
-	}
 	if stats.Weekly.Percent != 90 {
 		t.Fatalf("weekly remaining = %d, want 90", stats.Weekly.Percent)
 	}
@@ -106,9 +97,6 @@ func TestBuildCodexStatsMapsPrimarySevenDayWindowToWeekly(t *testing.T) {
 	}
 
 	stats := buildCodexStats(result)
-	if stats.Session.Percent != -1 {
-		t.Fatalf("session remaining = %d, want unknown", stats.Session.Percent)
-	}
 	if stats.Weekly.Percent != 75 {
 		t.Fatalf("weekly remaining = %d, want 75", stats.Weekly.Percent)
 	}
