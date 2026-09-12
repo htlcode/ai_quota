@@ -12,6 +12,7 @@ import (
 
 type CodexStats struct {
 	Available    bool
+	Session      QuotaInfo
 	Weekly       QuotaInfo
 	PlanType     string
 	ResetCredits int // -1 = unknown
@@ -167,6 +168,7 @@ func buildCodexStats(r rateLimitsResult) CodexStats {
 		Available:    true,
 		PlanType:     rl.PlanType,
 		ResetCredits: -1,
+		Session:      QuotaInfo{Label: "Session", Percent: -1},
 		Weekly:       QuotaInfo{Label: "Weekly", Percent: -1},
 	}
 
@@ -179,8 +181,12 @@ func buildCodexStats(r rateLimitsResult) CodexStats {
 	}
 
 	if rl.Primary != nil || rl.Secondary != nil {
-		if rl.Primary != nil && isCodexWeeklyWindow(rl.Primary.WindowDurationMins) {
-			stats.Weekly = codexQuota("Weekly", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+		if rl.Primary != nil {
+			if isCodexWeeklyWindow(rl.Primary.WindowDurationMins) {
+				stats.Weekly = codexQuota("Weekly", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+			} else {
+				stats.Session = codexQuota("Session", rl.Primary.UsedPercent, rl.Primary.ResetsAt)
+			}
 		}
 		if rl.Secondary != nil {
 			stats.Weekly = codexQuota("Weekly", rl.Secondary.UsedPercent, rl.Secondary.ResetsAt)
@@ -190,8 +196,12 @@ func buildCodexStats(r rateLimitsResult) CodexStats {
 		if codexLimits, ok := r.RateLimitsByLimitIDSnake["codex"]; ok {
 			snakeLimits = codexLimits
 		}
-		if snakeLimits.Primary != nil && isCodexWeeklyWindow(snakeLimits.Primary.WindowDurationMins) {
-			stats.Weekly = codexQuota("Weekly", snakeLimits.Primary.UsedPercent, snakeLimits.Primary.ResetsAt)
+		if snakeLimits.Primary != nil {
+			if isCodexWeeklyWindow(snakeLimits.Primary.WindowDurationMins) {
+				stats.Weekly = codexQuota("Weekly", snakeLimits.Primary.UsedPercent, snakeLimits.Primary.ResetsAt)
+			} else {
+				stats.Session = codexQuota("Session", snakeLimits.Primary.UsedPercent, snakeLimits.Primary.ResetsAt)
+			}
 		}
 		if snakeLimits.Secondary != nil {
 			stats.Weekly = codexQuota("Weekly", snakeLimits.Secondary.UsedPercent, snakeLimits.Secondary.ResetsAt)
