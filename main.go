@@ -1,9 +1,10 @@
 package main
 
 import (
+	"ai_quota/quota"
+	"ai_quota/reports"
 	"fmt"
 	"sync/atomic"
-	"time"
 
 	"github.com/getlantern/systray"
 )
@@ -30,13 +31,20 @@ func onReady() {
 
 	systray.AddSeparator()
 
+	systray.AddMenuItem("DEEPSEEK", "")
+	mDeepSeekBalance := systray.AddMenuItem("   Balance  loading...", "")
+
+	systray.AddSeparator()
+
+	mUsageReports := systray.AddMenuItem("Usage Reports…", "Open token and cost usage")
 	mRefresh := systray.AddMenuItem("↻  Refresh", "Refresh now")
 	mQuit := systray.AddMenuItem("✕  Quit", "Quit")
 
 	var refreshing atomic.Bool
-
+	var usageReportOpening atomic.Bool
 	refresh := func() {
-		if !refreshing.CompareAndSwap(false, true) {
+		startedRefresh := refreshing.CompareAndSwap(false, true)
+		if !startedRefresh {
 			return
 		}
 		defer refreshing.Store(false)
@@ -44,39 +52,45 @@ func onReady() {
 		mRefresh.Disable()
 		systray.SetTitle("AI ↻")
 
-		claudeCh := make(chan ClaudeStats, 1)
-		codexCh := make(chan CodexStats, 1)
+		quotaStats := quota.FetchStats()
+		claude := quotaStats.Claude
+		codex := quotaStats.Codex
+		deepSeek := quotaStats.DeepSeek
 
-		go func() { claudeCh <- fetchClaude() }()
-		go func() { codexCh <- fetchCodex() }()
-
-		claude := <-claudeCh
-		codex := <-codexCh
-
-		// Claude
 		if !claude.Available {
-			mClaudeSession.SetTitle("   ⚠ " + claude.Error)
+			claudeErrorTitle := "   ⚠ " + claude.Error
+			mClaudeSession.SetTitle(claudeErrorTitle)
 			mClaudeWeekly.SetTitle("")
 		} else {
-			mClaudeSession.SetTitle(formatQuota("Session", claude.Session))
-			mClaudeWeekly.SetTitle(formatQuota("Weekly ", claude.Weekly))
+			claudeSessionTitle := quota.Format("Session", claude.Session)
+			mClaudeSession.SetTitle(claudeSessionTitle)
+			claudeWeeklyTitle := quota.Format("Weekly ", claude.Weekly)
+			mClaudeWeekly.SetTitle(claudeWeeklyTitle)
 		}
 
-		// Codex
 		if !codex.Available {
 			codexErrorTitle := "   ⚠ " + codex.Error
 			mCodexSession.SetTitle(codexErrorTitle)
 			mCodexWeekly.SetTitle("")
 			mCodexResets.Hide()
 		} else {
-			codexSessionTitle := formatQuota("Session", codex.Session)
+			codexSessionTitle := quota.Format("Session", codex.Session)
 			mCodexSession.SetTitle(codexSessionTitle)
-			codexWeeklyTitle := formatQuota("Weekly ", codex.Weekly)
+			codexWeeklyTitle := quota.Format("Weekly ", codex.Weekly)
 			mCodexWeekly.SetTitle(codexWeeklyTitle)
 			updateCodexResetCredits(mCodexResets, codex.ResetCredits)
 		}
 
-		systray.SetTitle(menuBarTitle(claude, codex))
+		if !deepSeek.Available {
+			deepSeekErrorTitle := "   ⚠ " + deepSeek.Error
+			mDeepSeekBalance.SetTitle(deepSeekErrorTitle)
+		} else {
+			deepSeekBalanceTitle := quota.FormatDeepSeekBalances(deepSeek.Balances)
+			mDeepSeekBalance.SetTitle(deepSeekBalanceTitle)
+		}
+
+		statusTitle := quota.MenuBarTitle(quotaStats)
+		systray.SetTitle(statusTitle)
 		mRefresh.Enable()
 	}
 
@@ -84,6 +98,15 @@ func onReady() {
 
 	for {
 		select {
+		case <-mUsageReports.ClickedCh:
+			startedOpening := usageReportOpening.CompareAndSwap(false, true)
+			if !startedOpening {
+				continue
+			}
+			go func() {
+				defer usageReportOpening.Store(false)
+				_ = reports.Open()
+			}()
 		case <-mRefresh.ClickedCh:
 			go refresh()
 		case <-mQuit.ClickedCh:
@@ -98,62 +121,7 @@ func updateCodexResetCredits(item *systray.MenuItem, count int) {
 		item.Hide()
 		return
 	}
-	item.SetTitle(fmt.Sprintf("   Usage resets available : %d", count))
+	title := fmt.Sprintf("   Usage resets available : %d", count)
+	item.SetTitle(title)
 	item.Show()
-}
-
-func formatQuota(label string, q QuotaInfo) string {
-	if q.Percent < 0 {
-		return fmt.Sprintf("   %s   ▱▱▱▱▱▱▱▱▱▱  n/a", label)
-	}
-	bar := progressBar(q.Percent, 10)
-	reset := ""
-	if !q.ResetsAt.IsZero() {
-		reset = "  ·  " + formatReset(q.ResetsAt)
-	}
-	return fmt.Sprintf("   %s   %s  %3d%%%s", label, bar, q.Percent, reset)
-}
-
-// formatReset returns "resets HH:MM" if same day, else "resets YYYY/MM/DD at HH:MM".
-func formatReset(t time.Time) string {
-	now := time.Now()
-	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
-		return fmt.Sprintf("resets %s", t.Format("15:04"))
-	}
-	return fmt.Sprintf("resets %s", t.Format("2006/01/02 at 15:04"))
-}
-
-// progressBar uses ▰/▱ (Black/White Sesame Dot) — both Geometric Shapes,
-// guaranteed same width in proportional fonts so bars align perfectly.
-func progressBar(pct, width int) string {
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-
-	filled := pct * width / 100
-
-	bar := ""
-	for i := 0; i < width; i++ {
-		if i < filled {
-			bar += "▰"
-		} else {
-			bar += "▱"
-		}
-	}
-	return bar
-}
-
-// menuBarTitle: green if all probes returned data, red if any failed.
-// Never shows percentage.
-func menuBarTitle(c ClaudeStats, cx CodexStats) string {
-	claudeOK := c.Available && (c.Session.Percent >= 0 || c.Weekly.Percent >= 0)
-	codexOK := cx.Available && (cx.Session.Percent >= 0 || cx.Weekly.Percent >= 0)
-
-	if claudeOK && codexOK {
-		return "🟢 AI"
-	}
-	return "🔴 AI"
 }

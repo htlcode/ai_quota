@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Usage Reports</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fff;
+      --text: #1d1d1f;
+      --muted: #6e6e73;
+      --border: #d9d9de;
+      --error: #b42318;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1e1e1e; --text: #f5f5f7; --muted: #a1a1a6; --border: #414141; --error: #ff8a80; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 720px; color: var(--text); background: var(--bg); font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    main { padding: 9px 11px 11px; }
+    header { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+    h1 { margin: 0 auto 0 0; font-size: 14px; font-weight: 600; }
+    h2 { margin: 9px 0 5px; font-size: 12px; font-weight: 600; }
+    #updated, .muted { color: var(--muted); }
+    .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 10px; }
+    .card { min-width: 0; }
+    .card-title { margin-bottom: 3px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+    th, td { padding: 3px 5px; border: 1px solid var(--border); text-align: left; }
+    th:last-child, td:last-child { text-align: right; }
+    th { color: var(--muted); font-weight: 500; }
+    td:nth-child(3), th:nth-child(3) { text-align: right; }
+    .ai-total td, tfoot td { font-weight: 600; }
+    .model-ai { width: 22px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-bottom: 3px; color: var(--muted); font-size: 10px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 4px; }
+    .swatch { width: 7px; height: 7px; }
+    #chart { overflow-x: auto; }
+    .plot { display: grid; grid-template-columns: repeat(7, minmax(280px, 1fr)); gap: 5px; width: max-content; height: 250px; padding-top: 4px; border-top: 1px solid var(--border); }
+    .day { display: grid; grid-template-rows: 210px auto; min-width: 0; text-align: center; }
+    .bars { display: flex; align-items: flex-end; justify-content: center; gap: 5px; min-width: 0; }
+    .bar-unit { display: grid; grid-template-rows: 176px 14px 16px; width: 62px; align-items: end; }
+    .stack { display: flex; flex-direction: column-reverse; align-self: end; width: 30px; height: 176px; margin: 0 auto; justify-content: flex-start; }
+    .segment { flex: 0 0 auto; }
+    .ai-code { color: var(--muted); font-size: 9px; line-height: 14px; white-space: nowrap; }
+    .cost-short { font-size: 9px; font-variant-numeric: tabular-nums; line-height: 14px; }
+    .day-label { padding-top: 3px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
+    .state { padding: 20px 8px; color: var(--muted); text-align: center; }
+    #warnings { margin-top: 5px; color: var(--error); font-size: 11px; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 4px; background: var(--muted); background-clip: padding-box; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Usage</h1>
+      <span id="updated"></span>
+    </header>
+
+    <h2>Last 7 days — tokens by AI and model</h2>
+    <div id="legend" class="legend"></div>
+    <div id="chart" class="state"></div>
+    <div id="warnings" role="status"></div>
+    <div id="summary" class="summary"></div>
+  </main>
+  <script>
+    const summary = document.getElementById('summary');
+    const legend = document.getElementById('legend');
+    const chart = document.getElementById('chart');
+    const warnings = document.getElementById('warnings');
+    const updated = document.getElementById('updated');
+    const usageSnapshot = __USAGE_SNAPSHOT__;
+    const numberFormat = new Intl.NumberFormat('en-US');
+    const compactFormat = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+    const currencyFormat = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    const aiOrder = ['Claude', 'OpenAI', 'DeepSeek', 'Other'];
+    const palettes = {
+      Claude: ['#e87722', '#f39a4a', '#f6b878', '#b95616'],
+      OpenAI: ['#111111', '#303030', '#505050', '#707070'],
+      DeepSeek: ['#1769e0', '#438be8', '#75aaf0', '#0d4faa'],
+      Other: ['#18864b', '#36a867', '#69c58d', '#0f6537']
+    };
+
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className !== '') node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function currency(value) { return currencyFormat.format(value); }
+    function exactTokens(value) { return `${numberFormat.format(value)} tokens`; }
+    function shortTokens(value) { return compactFormat.format(value); }
+
+    function twoDigits(value) {
+      const text = String(value);
+      return text.padStart(2, '0');
+    }
+
+    function localDateKey(date) {
+      const year = date.getFullYear();
+      const monthValue = date.getMonth() + 1;
+      const month = twoDigits(monthValue);
+      const dayValue = date.getDate();
+      const day = twoDigits(dayValue);
+      return `${year}-${month}-${day}`;
+    }
+
+    function orderedAIs(values) {
+      const result = Array.from(values);
+      result.sort((left, right) => {
+        let leftIndex = aiOrder.indexOf(left);
+        let rightIndex = aiOrder.indexOf(right);
+        if (leftIndex < 0) leftIndex = aiOrder.length;
+        if (rightIndex < 0) rightIndex = aiOrder.length;
+        if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+        return left.localeCompare(right);
+      });
+      return result;
+    }
+
+    function summaryCard(period) {
+      const card = element('section', 'card');
+      const title = element('div', 'card-title', period.label);
+      const table = element('table', '');
+      const head = element('thead', '');
+      const headRow = element('tr', '');
+      const headings = ['AI', 'Model', 'Tokens', 'Cost'];
+      headings.forEach((heading) => {
+        const cell = element('th', '', heading);
+        headRow.append(cell);
+      });
+      head.append(headRow);
+      const body = element('tbody', '');
+      const grouped = new Map();
+      period.models.forEach((model) => {
+        let models = grouped.get(model.ai);
+        if (models === undefined) {
+          models = [];
+          grouped.set(model.ai, models);
+        }
+        models.push(model);
+      });
+      const groupedAIs = grouped.keys();
+      const ais = orderedAIs(groupedAIs);
+      ais.forEach((ai) => {
+        const models = grouped.get(ai);
+        let groupTokens = 0;
+        let groupCost = 0;
+        models.forEach((model) => {
+          groupTokens += model.tokens;
+          groupCost += model.cost_usd;
+        });
+        const groupRow = element('tr', 'ai-total');
+        const groupName = element('td', '', ai);
+        groupName.colSpan = 2;
+        const groupTokenText = shortTokens(groupTokens);
+        const groupTokenCell = element('td', '', groupTokenText);
+        groupTokenCell.title = exactTokens(groupTokens);
+        const groupCostText = currency(groupCost);
+        const groupCostCell = element('td', '', groupCostText);
+        let palette = palettes[ai];
+        if (palette === undefined) palette = palettes.Other;
+        groupRow.style.background = palette[0];
+        groupRow.style.color = '#fff';
+        if (ai === 'Claude') groupRow.style.color = '#111';
+        groupRow.append(groupName, groupTokenCell, groupCostCell);
+        body.append(groupRow);
+        models.forEach((model) => {
+          const row = element('tr', '');
+          const aiSpace = element('td', 'model-ai', '');
+          aiSpace.style.background = palette[0];
+          const name = element('td', '', model.model);
+          const tokenText = shortTokens(model.tokens);
+          const tokens = element('td', '', tokenText);
+          tokens.title = exactTokens(model.tokens);
+          const costText = currency(model.cost_usd);
+          const cost = element('td', '', costText);
+          row.append(aiSpace, name, tokens, cost);
+          body.append(row);
+        });
+      });
+      const foot = element('tfoot', '');
+      const totalRow = element('tr', '');
+      const totalLabel = element('td', '', 'Total');
+      totalLabel.colSpan = 2;
+      const totalTokenText = shortTokens(period.total_tokens);
+      const totalTokens = element('td', '', totalTokenText);
+      totalTokens.title = exactTokens(period.total_tokens);
+      const totalCostText = currency(period.total_cost_usd);
+      const totalCost = element('td', '', totalCostText);
+      totalRow.append(totalLabel, totalTokens, totalCost);
+      foot.append(totalRow);
+      table.append(head, body, foot);
+      card.append(title, table);
+      return card;
+    }
+
+    function renderSummary(snapshot) {
+      const current = summaryCard(snapshot.current_month);
+      const previous = summaryCard(snapshot.previous_month);
+      summary.replaceChildren(current, previous);
+    }
+
+    function recentDays(generatedAt) {
+      const days = [];
+      const current = new Date(generatedAt);
+      const currentDay = current.getDate();
+      for (let offset = 0; offset < 7; offset += 1) {
+        const date = new Date(current);
+        const targetDay = currentDay - offset;
+        date.setDate(targetDay);
+        const key = localDateKey(date);
+        const monthValue = date.getMonth() + 1;
+        const month = twoDigits(monthValue);
+        const dayValue = date.getDate();
+        const day = twoDigits(dayValue);
+        const label = `${month}/${day}`;
+        const dayDetails = { key, label };
+        days.push(dayDetails);
+      }
+      return days;
+    }
+
+    function chartData(rows) {
+      const data = new Map();
+      rows.forEach((row) => {
+        let day = data.get(row.date);
+        if (day === undefined) {
+          day = new Map();
+          data.set(row.date, day);
+        }
+        let models = day.get(row.ai);
+        if (models === undefined) {
+          models = [];
+          day.set(row.ai, models);
+        }
+        models.push(row);
+      });
+      return data;
+    }
+
+    function colorMap(rows) {
+      const modelsByAI = new Map();
+      rows.forEach((row) => {
+        let models = modelsByAI.get(row.ai);
+        if (models === undefined) {
+          models = new Set();
+          modelsByAI.set(row.ai, models);
+        }
+        models.add(row.model);
+      });
+      const colors = new Map();
+      const groupedAIs = modelsByAI.keys();
+      const ais = orderedAIs(groupedAIs);
+      ais.forEach((ai) => {
+        const modelSet = modelsByAI.get(ai);
+        const models = Array.from(modelSet);
+        models.sort();
+        let palette = palettes[ai];
+        if (palette === undefined) palette = palettes.Other;
+        models.forEach((model, index) => {
+          const colorIndex = index % palette.length;
+          const color = palette[colorIndex];
+          colors.set(`${ai}\u0000${model}`, color);
+        });
+      });
+      return colors;
+    }
+
+    function maximumDailyTokens(data) {
+      let maximum = 0;
+      data.forEach((day) => {
+        day.forEach((models) => {
+          let total = 0;
+          models.forEach((model) => { total += model.total_tokens; });
+          if (total > maximum) maximum = total;
+        });
+      });
+      return maximum;
+    }
+
+    function renderLegend(rows, colors) {
+      const seen = new Set();
+      const items = document.createDocumentFragment();
+      rows.forEach((row) => {
+        const key = `${row.ai}\u0000${row.model}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const item = element('span', 'legend-item');
+        const swatch = element('span', 'swatch');
+        swatch.style.background = colors.get(key);
+        const labelText = `${row.ai} · ${row.model}`;
+        const label = element('span', '', labelText);
+        item.append(swatch, label);
+        items.append(item);
+      });
+      legend.replaceChildren(items);
+    }
+
+    function renderChart(snapshot) {
+      if (snapshot.rows.length === 0) {
+        chart.className = 'state';
+        chart.textContent = 'No usage in the last 7 days.';
+        return;
+      }
+      const days = recentDays(snapshot.generated_at);
+      const data = chartData(snapshot.rows);
+      const colors = colorMap(snapshot.rows);
+      const maximum = maximumDailyTokens(data);
+      renderLegend(snapshot.rows, colors);
+      const plot = element('div', 'plot');
+      days.forEach((day) => {
+        const dayNode = element('div', 'day');
+        const bars = element('div', 'bars');
+        const dayData = data.get(day.key);
+        let ais = [];
+        if (dayData !== undefined) {
+          const activeAIs = dayData.keys();
+          ais = orderedAIs(activeAIs);
+        }
+        ais.forEach((ai) => {
+          const unit = element('div', 'bar-unit');
+          unit.title = ai;
+          const stack = element('div', 'stack');
+          const models = dayData.get(ai);
+          let tokenTotal = 0;
+          let costTotal = 0;
+          models.forEach((model) => {
+            tokenTotal += model.total_tokens;
+            costTotal += model.cost_usd;
+            const segment = element('div', 'segment');
+            let height = 0;
+            if (maximum > 0) height = model.total_tokens / maximum * 100;
+            segment.style.height = `${height}%`;
+            if (model.total_tokens > 0) segment.style.minHeight = '1px';
+            const colorKey = `${ai}\u0000${model.model}`;
+            segment.style.background = colors.get(colorKey);
+            const modelCost = currency(model.cost_usd);
+            const modelTokens = exactTokens(model.total_tokens);
+            const detail = `${model.model}\n${modelTokens}\n${modelCost}`;
+            segment.title = detail;
+            stack.append(segment);
+          });
+          const code = element('div', 'ai-code', ai);
+          const costText = currency(costTotal);
+          const costLabel = element('div', 'cost-short', costText);
+          const exactTokenText = exactTokens(tokenTotal);
+          const costDetail = `${exactTokenText} · ${costText}`;
+          costLabel.title = costDetail;
+          unit.append(stack, code, costLabel);
+          bars.append(unit);
+        });
+        const dayLabel = element('div', 'day-label', day.label);
+        dayNode.append(bars, dayLabel);
+        plot.append(dayNode);
+      });
+      chart.className = '';
+      chart.replaceChildren(plot);
+    }
+
+    function render(snapshot) {
+      renderSummary(snapshot);
+      renderChart(snapshot);
+      const generated = new Date(snapshot.generated_at);
+      const time = generated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      updated.textContent = `Updated ${time}`;
+      warnings.textContent = snapshot.warnings.join(' · ');
+    }
+
+    render(usageSnapshot);
+  </script>
+</body>
+</html>
