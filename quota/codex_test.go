@@ -1,4 +1,4 @@
-package main
+package quota
 
 import (
 	"encoding/json"
