@@ -4,12 +4,25 @@ import (
 	"ai_quota/quota"
 	"ai_quota/reports"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/getlantern/systray"
 )
 
 func main() {
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	executableDirectory := filepath.Dir(executable)
+	pricingPath := filepath.Join(executableDirectory, "pricing.json")
+	err = reports.LoadPricing(pricingPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 	systray.Run(onReady, nil)
 }
 

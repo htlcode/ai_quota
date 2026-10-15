@@ -1,29 +1,86 @@
 package reports
 
-import "strings"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// Bump when parsing or pricing logic changes so cached file costs are recomputed.
+const usagePricingVersion = "2"
 
 type usageRate struct {
-	Input      float64
-	Output     float64
-	CacheRead  float64
-	CacheWrite float64
+	Input          float64 `json:"input"`
+	Output         float64 `json:"output"`
+	CacheRead      float64 `json:"cache_read"`
+	CacheWrite     float64 `json:"cache_write"`
+	CacheWriteLong float64 `json:"cache_write_long"`
 }
 
-var claudeUsageRates = map[string]usageRate{
-	"claude-haiku-4-5-20251001": {Input: 1, Output: 5, CacheRead: 0.1, CacheWrite: 1.25},
-	"claude-opus-4-8":           {Input: 5, Output: 25, CacheRead: 0.5, CacheWrite: 6.25},
-	"claude-opus-5":             {Input: 5, Output: 25, CacheRead: 0.5, CacheWrite: 6.25},
-	"claude-sonnet-4-6":         {Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
-	"claude-sonnet-5":           {Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
+var claudeUsageRates map[string]usageRate
+
+var codexUsageRates map[string]usageRate
+
+type usagePricing struct {
+	Claude map[string]usageRate `json:"claude"`
+	Codex  map[string]usageRate `json:"codex"`
 }
 
-var codexUsageRates = map[string]usageRate{
-	"gpt-5.4-mini":  {Input: 0.75, Output: 4.5, CacheRead: 0.075},
-	"gpt-5.5":       {Input: 5, Output: 30, CacheRead: 0.5},
-	"gpt-5.6-luna":  {Input: 0.2, Output: 1.2, CacheRead: 0.02, CacheWrite: 0.25},
-	"gpt-5.6-sol":   {Input: 4, Output: 20, CacheRead: 0.4, CacheWrite: 5},
-	"gpt-5.6-terra": {Input: 2, Output: 12, CacheRead: 0.2, CacheWrite: 2.5},
-	"gpt-6-astra":   {Input: 10, Output: 50, CacheRead: 1, CacheWrite: 12.5},
+// LoadPricing loads USD rates per million tokens before reports are used.
+func LoadPricing(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open pricing file: %w", err)
+	}
+	defer file.Close()
+
+	var pricing usagePricing
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	err = decoder.Decode(&pricing)
+	if err != nil {
+		return fmt.Errorf("decode pricing file %s: %w", path, err)
+	}
+	var trailing any
+	err = decoder.Decode(&trailing)
+	if err != io.EOF {
+		return fmt.Errorf("pricing file %s must contain one JSON object", path)
+	}
+	err = validateUsageRates("claude", pricing.Claude)
+	if err != nil {
+		return err
+	}
+	err = validateUsageRates("codex", pricing.Codex)
+	if err != nil {
+		return err
+	}
+	claudeUsageRates = pricing.Claude
+	codexUsageRates = pricing.Codex
+	return nil
+}
+
+func validateUsageRates(provider string, rates map[string]usageRate) error {
+	rateCount := len(rates)
+	if rateCount == 0 {
+		return fmt.Errorf("pricing: %s must contain at least one model", provider)
+	}
+	for model, rate := range rates {
+		if model == "" {
+			return errors.New("pricing: model names must not be empty")
+		}
+		values := []float64{rate.Input, rate.Output, rate.CacheRead, rate.CacheWrite, rate.CacheWriteLong}
+		for _, value := range values {
+			if value < 0 {
+				return fmt.Errorf("pricing: %s/%s rates must not be negative", provider, model)
+			}
+		}
+	}
+	return nil
 }
 
 func estimateUsageCost(tokens TokenUsage, rate usageRate) float64 {
@@ -37,6 +94,15 @@ func estimateUsageCost(tokens TokenUsage, rate usageRate) float64 {
 	return cost
 }
 
+// usagePricingFingerprint changes whenever a rate or the pricing version changes.
+func usagePricingFingerprint() string {
+	rates := fmt.Sprint(usagePricingVersion, claudeUsageRates, codexUsageRates)
+	ratesData := []byte(rates)
+	digest := sha256.Sum256(ratesData)
+	fingerprint := hex.EncodeToString(digest[:])
+	return fingerprint
+}
+
 func claudeUsageRate(model string) (usageRate, bool) {
 	rate, found := claudeUsageRates[model]
 	if found {
@@ -44,13 +110,13 @@ func claudeUsageRate(model string) (usageRate, bool) {
 	}
 	isOpusFive := strings.HasPrefix(model, "claude-opus-5")
 	if isOpusFive {
-		rate = claudeUsageRates["claude-opus-5"]
-		return rate, true
+		rate, found = claudeUsageRates["claude-opus-5"]
+		return rate, found
 	}
 	isSonnetFive := strings.HasPrefix(model, "claude-sonnet-5")
 	if isSonnetFive {
-		rate = claudeUsageRates["claude-sonnet-5"]
-		return rate, true
+		rate, found = claudeUsageRates["claude-sonnet-5"]
+		return rate, found
 	}
 	return usageRate{}, false
 }

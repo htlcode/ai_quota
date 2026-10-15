@@ -39,7 +39,14 @@ CREATE TABLE IF NOT EXISTS file_daily_usage (
 
 CREATE INDEX IF NOT EXISTS idx_file_daily_usage_day
 ON file_daily_usage(day, source);
+
+CREATE TABLE IF NOT EXISTS cache_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 `
+
+const pricingFingerprintKey = "pricing_fingerprint"
 
 type usageCache struct {
 	db *sql.DB
@@ -73,7 +80,55 @@ func openUsageCache(ctx context.Context) (*usageCache, error) {
 		return nil, permissionError
 	}
 	cache := &usageCache{db: db}
+	resetError := cache.resetOnPricingChange(ctx)
+	if resetError != nil {
+		_ = db.Close()
+		return nil, resetError
+	}
 	return cache, nil
+}
+
+// resetOnPricingChange drops cached file costs computed with outdated rates.
+func (cache *usageCache) resetOnPricingChange(ctx context.Context) error {
+	fingerprint := usagePricingFingerprint()
+	selectQuery := "SELECT value FROM cache_meta WHERE key = ?"
+	var storedFingerprint string
+	row := cache.db.QueryRowContext(ctx, selectQuery, pricingFingerprintKey)
+	err := row.Scan(&storedFingerprint)
+	isMissing := errors.Is(err, sql.ErrNoRows)
+	if isMissing {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	if storedFingerprint == fingerprint {
+		return nil
+	}
+
+	transaction, err := cache.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	_, err = transaction.ExecContext(ctx, "DELETE FROM file_daily_usage")
+	if err != nil {
+		return err
+	}
+	_, err = transaction.ExecContext(ctx, "DELETE FROM source_files")
+	if err != nil {
+		return err
+	}
+	upsertQuery := `
+		INSERT INTO cache_meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`
+	_, err = transaction.ExecContext(ctx, upsertQuery, pricingFingerprintKey, fingerprint)
+	if err != nil {
+		return err
+	}
+	err = transaction.Commit()
+	return err
 }
 
 func (cache *usageCache) pruneSourceFiles(ctx context.Context, source string, currentPaths map[string]struct{}) error {

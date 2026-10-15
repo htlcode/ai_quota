@@ -3,6 +3,7 @@ package reports
 import (
 	"context"
 	"database/sql"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,34 @@ func TestParseClaudeUsageFileDeduplicatesStreamingUpdates(t *testing.T) {
 	}
 	if row.CostKind != costComputed {
 		t.Errorf("cost kind = %q, want computed", row.CostKind)
+	}
+}
+
+func TestParseClaudeUsageFilePricesLongTTLCacheWrites(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "session.jsonl")
+	content := `{"type":"assistant","requestId":"request-1","sessionId":"session-1","timestamp":"2026-09-07T01:00:00Z","message":{"id":"message-1","role":"assistant","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":3000000,"cache_creation":{"ephemeral_5m_input_tokens":1000000,"ephemeral_1h_input_tokens":2000000}}}}` + "\n"
+	data := []byte(content)
+	writeError := os.WriteFile(path, data, 0o600)
+	if writeError != nil {
+		t.Fatal(writeError)
+	}
+	startTime := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	rows, err := parseClaudeUsageFile(ctx, path, startTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rowCount := len(rows)
+	if rowCount != 1 {
+		t.Fatalf("rows = %d, want 1", rowCount)
+	}
+	row := rows[0]
+	wantCost := 2.5 + 2*4.0
+	costDelta := row.CostUSD - wantCost
+	costGap := math.Abs(costDelta)
+	if costGap > 1e-9 {
+		t.Errorf("cost = %f, want %f", row.CostUSD, wantCost)
 	}
 }
 

@@ -12,11 +12,16 @@ import (
 
 const claudeUsageSource = "Claude Code"
 
+type claudeCacheCreation struct {
+	LongTTL int64 `json:"ephemeral_1h_input_tokens"`
+}
+
 type claudeUsageCounters struct {
-	Input         int64  `json:"input_tokens"`
-	Output        int64  `json:"output_tokens"`
-	CacheRead     *int64 `json:"cache_read_input_tokens"`
-	CacheCreation *int64 `json:"cache_creation_input_tokens"`
+	Input              int64                `json:"input_tokens"`
+	Output             int64                `json:"output_tokens"`
+	CacheRead          *int64               `json:"cache_read_input_tokens"`
+	CacheCreation      *int64               `json:"cache_creation_input_tokens"`
+	CacheCreationByTTL *claudeCacheCreation `json:"cache_creation"`
 }
 
 type claudeUsageMessage struct {
@@ -38,10 +43,11 @@ type claudeUsageLine struct {
 }
 
 type claudeRequestUsage struct {
-	Timestamp time.Time
-	Model     string
-	Tokens    TokenUsage
-	CostUSD   *float64
+	Timestamp      time.Time
+	Model          string
+	Tokens         TokenUsage
+	CacheWriteLong int64
+	CostUSD        *float64
 }
 
 func syncClaudeUsage(ctx context.Context, cache *usageCache, startTime time.Time) []string {
@@ -122,11 +128,13 @@ func parseClaudeUsageFile(ctx context.Context, path string, startTime time.Time)
 		if reportedCost == nil {
 			reportedCost = line.Message.CostUSD
 		}
+		cacheWriteLong := claudeCacheWriteLong(line.Message.Usage)
 		request := claudeRequestUsage{
-			Timestamp: timestamp,
-			Model:     line.Message.Model,
-			Tokens:    tokens,
-			CostUSD:   reportedCost,
+			Timestamp:      timestamp,
+			Model:          line.Message.Model,
+			Tokens:         tokens,
+			CacheWriteLong: cacheWriteLong,
+			CostUSD:        reportedCost,
 		}
 		requests[requestKey] = request
 	}
@@ -155,6 +163,25 @@ func claudeTokens(usage claudeUsageCounters) TokenUsage {
 		CacheWrite: cacheWrite,
 	}
 	return tokens
+}
+
+// claudeCacheWriteLong returns the 1-hour TTL share of cache writes, billed above the 5-minute rate.
+func claudeCacheWriteLong(usage claudeUsageCounters) int64 {
+	if usage.CacheCreationByTTL == nil {
+		return 0
+	}
+	cacheWriteLong := usage.CacheCreationByTTL.LongTTL
+	return cacheWriteLong
+}
+
+func claudeRequestCost(request claudeRequestUsage, rate usageRate) float64 {
+	shortTokens := request.Tokens
+	shortTokens.CacheWrite = request.Tokens.CacheWrite - request.CacheWriteLong
+	shortCost := estimateUsageCost(shortTokens, rate)
+	longTokens := float64(request.CacheWriteLong)
+	longCost := longTokens * rate.CacheWriteLong / 1_000_000
+	cost := shortCost + longCost
+	return cost
 }
 
 func claudeRequestKey(line claudeUsageLine, lineNumber int) string {
@@ -186,7 +213,7 @@ func aggregateClaudeRequests(requests map[string]claudeRequestUsage) []DailyMode
 		} else {
 			rate, found := claudeUsageRate(request.Model)
 			if found {
-				cost = estimateUsageCost(request.Tokens, rate)
+				cost = claudeRequestCost(request, rate)
 			} else {
 				costKind = costMissing
 			}
